@@ -59,7 +59,9 @@ def build_burst(prefix: str) -> list[Submission]:
     burst = []
     for suffix, customer_id, items, copies in plan:
         ref = f"{prefix}-{suffix}"
-        burst += [Submission(ref, n, order_body(ref, customer_id, items)) for n in range(1, copies + 1)]
+        burst += [
+            Submission(ref, n, order_body(ref, customer_id, items)) for n in range(1, copies + 1)
+        ]
     conflict_ref = f"{prefix}-ORD-001"
     burst.append(Submission(conflict_ref, 5, order_body(conflict_ref, "cust-1", {"BAN-001": 9})))
     return burst
@@ -85,7 +87,10 @@ async def run(base_url: str, prefix: str, fixed_refs: bool) -> bool:
 
         print(f"{'order_ref':<26} {'try':>3} {'status':>6}  replay")
         for o in outcomes:
-            print(f"{o.submission.order_ref:<26} {o.submission.attempt:>3} {o.status:>6}  {o.replay or '-'}")
+            print(
+                f"{o.submission.order_ref:<26} {o.submission.attempt:>3} "
+                f"{o.status:>6}  {o.replay or '-'}"
+            )
 
         refs = list(dict.fromkeys(s.order_ref for s in burst))
         stored = {}
@@ -94,7 +99,10 @@ async def run(base_url: str, prefix: str, fixed_refs: bool) -> bool:
             stored[ref] = response.json() if response.status_code == 200 else None
 
     ok = True
-    print(f"\n{'order_ref':<26} {'sent':>4} {'201':>3} {'200':>3} {'409':>3} {'total_cents':>11}  verdict")
+    print(
+        f"\n{'order_ref':<26} {'sent':>4} {'201':>3} {'200':>3} {'409':>3} "
+        f"{'total_cents':>11}  verdict"
+    )
     for ref in refs:
         mine = [o for o in outcomes if o.submission.order_ref == ref]
         counts = Counter(o.status for o in mine)
@@ -102,7 +110,10 @@ async def run(base_url: str, prefix: str, fixed_refs: bool) -> bool:
         ok = ok and not problems
         total = stored[ref]["total_cents"] if stored[ref] else "-"
         verdict = "ok" if not problems else "FAIL: " + "; ".join(problems)
-        print(f"{ref:<26} {len(mine):>4} {counts[201]:>3} {counts[200]:>3} {counts[409]:>3} {total:>11}  {verdict}")
+        print(
+            f"{ref:<26} {len(mine):>4} {counts[201]:>3} {counts[200]:>3} {counts[409]:>3} "
+            f"{total:>11}  {verdict}"
+        )
     return ok
 
 
@@ -128,7 +139,11 @@ def check(outcomes: list[Outcome], stored: dict | None, fixed_refs: bool) -> lis
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base-url", default=os.environ.get("BASE_URL", "http://localhost:8000"))
-    parser.add_argument("--fixed-refs", action="store_true", help="reuse stable order_refs to show replays across runs")
+    parser.add_argument(
+        "--fixed-refs",
+        action="store_true",
+        help="reuse stable order_refs to show replays across runs",
+    )
     args = parser.parse_args()
     prefix = "DEMO" if args.fixed_refs else time.strftime("RUN%Y%m%d-%H%M%S")
     try:

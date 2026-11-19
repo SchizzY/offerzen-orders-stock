@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from app import health
 from app.catalog.router import router as catalog_router
 from app.db import engine
+from app.orders.router import router as orders_router
 from app.valkey import valkey
 
 
@@ -20,6 +21,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Orders & Stock", lifespan=lifespan)
     app.include_router(health.router)
     app.include_router(catalog_router)
+    app.include_router(orders_router)
     return app
 
 
