@@ -1,5 +1,5 @@
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -38,7 +38,7 @@ async def test_health_returns_503_naming_the_unreachable_dependency(
 async def test_health_returns_503_when_postgres_is_unreachable() -> None:
     unreachable = create_async_engine("postgresql+asyncpg://orders:orders@localhost:1/orders")
 
-    async def unreachable_session() -> AsyncIterator[AsyncSession]:
+    async def unreachable_session() -> AsyncGenerator[AsyncSession, None]:
         async with async_sessionmaker(unreachable)() as session:
             yield session
 
