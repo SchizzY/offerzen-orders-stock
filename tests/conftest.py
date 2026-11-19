@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -19,6 +19,6 @@ async def clean_tables() -> None:
 
 
 @pytest.fixture
-async def client() -> AsyncIterator[AsyncClient]:
+async def client() -> AsyncGenerator[AsyncClient, None]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
