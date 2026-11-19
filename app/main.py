@@ -1,10 +1,8 @@
 import json
-import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response, status
-from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 
 from app import health
@@ -21,22 +19,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await engine.dispose()
 
 
-def _standard_json(value: object) -> object:
-    if isinstance(value, float) and not math.isfinite(value):
-        return str(value)
-    if isinstance(value, dict):
-        return {key: _standard_json(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_standard_json(item) for item in value]
-    return value
-
-
 async def validation_error(_: Request, exc: RequestValidationError) -> Response:
-    # Errors echo the rejected input; ASCII escaping keeps a lone surrogate encodable,
-    # and non-finite floats become strings because NaN/Infinity are not JSON.
-    detail = _standard_json(jsonable_encoder(exc.errors()))
+    # The rejected input is not echoed: it can be bytes, NaN, a lone surrogate or deeply
+    # nested, none of which encode safely, and the client already has it.
+    detail = [{key: error[key] for key in ("type", "loc", "msg")} for error in exc.errors()]
     return Response(
-        json.dumps({"detail": detail}, separators=(",", ":"), allow_nan=False),
+        json.dumps({"detail": detail}, separators=(",", ":")),
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         media_type="application/json",
     )

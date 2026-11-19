@@ -207,6 +207,30 @@ async def test_rejection_of_non_finite_number_is_standard_json(
     assert ["body", "items", 0, "qty"] in [error["loc"] for error in detail]
 
 
+@pytest.mark.parametrize(
+    ("content", "content_type"),
+    [
+        (b"\xff", None),
+        (b"\xff", "application/octet-stream"),
+        (b"\xff", "text/plain"),
+        (
+            b'{"order_ref":' + b"[" * 1000 + b"]" * 1000 + b',"customer_id":"c","items":[]}',
+            "application/json",
+        ),
+    ],
+    ids=["binary-no-type", "binary-octet-stream", "binary-text", "deeply-nested"],
+)
+async def test_unparseable_order_body_is_rejected_as_json(
+    client: AsyncClient, content: bytes, content_type: str | None
+) -> None:
+    headers = {"Content-Type": content_type} if content_type else {}
+    response = await client.post("/orders", content=content, headers=headers)
+
+    assert response.status_code == 422
+    assert "detail" in response.json()
+    assert await count(Order) == 0
+
+
 async def test_order_accepts_the_largest_quantity(client: AsyncClient) -> None:
     response = await client.post("/orders", json={**ORDER, **item(qty=10_000)})
 
