@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     valkey_url: str = "redis://localhost:56379/0"
     db_connect_timeout_seconds: float = 5
     db_command_timeout_seconds: float = 10
+    db_pool_size: int = 5
+    db_max_overflow: int = 0
 
 
 settings = Settings()

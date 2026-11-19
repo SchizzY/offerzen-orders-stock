@@ -24,6 +24,8 @@ class Base(DeclarativeBase):
 engine = create_async_engine(
     settings.database_url,
     pool_pre_ping=True,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
     hide_parameters=True,
     connect_args={
         "timeout": settings.db_connect_timeout_seconds,

@@ -97,7 +97,7 @@ async def run(base_url: str, prefix: str, fixed_refs: bool) -> bool:
         stored = {}
         for ref in refs:
             response = await client.get(f"/orders/{ref}")
-            stored[ref] = response.json() if response.status_code == 200 else None
+            stored[ref] = response.json() if response.status_code == 200 else response.status_code
 
     ok = True
     print(
@@ -109,7 +109,7 @@ async def run(base_url: str, prefix: str, fixed_refs: bool) -> bool:
         counts = Counter(o.status for o in mine)
         problems = check(mine, stored[ref], fixed_refs)
         ok = ok and not problems
-        total = stored[ref]["total_cents"] if stored[ref] else "-"
+        total = stored[ref]["total_cents"] if isinstance(stored[ref], dict) else "-"
         verdict = "ok" if not problems else "FAIL: " + "; ".join(problems)
         print(
             f"{ref:<34} {len(mine):>4} {counts[201]:>3} {counts[200]:>3} {counts[409]:>3} "
@@ -118,10 +118,10 @@ async def run(base_url: str, prefix: str, fixed_refs: bool) -> bool:
     return ok
 
 
-def check(outcomes: list[Outcome], stored: dict | None, fixed_refs: bool) -> list[str]:
+def check(outcomes: list[Outcome], stored: dict | int, fixed_refs: bool) -> list[str]:
     """The stored order picks the winning body; it must be created once and replayed, others 409."""
-    if stored is None:
-        return ["GET returned no order"]
+    if isinstance(stored, int):
+        return [f"GET returned {stored}"]
     problems = []
     created = sum(o.status == 201 for o in outcomes)
     if created > 1:
