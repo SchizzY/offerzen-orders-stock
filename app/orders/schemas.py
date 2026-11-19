@@ -1,20 +1,19 @@
 from datetime import datetime
-from typing import Annotated
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import BaseModel, Field, field_validator
 
-NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+from app.types import Code, Quantity
 
 
 class OrderItemIn(BaseModel):
-    sku: NonEmptyStr
-    qty: int = Field(ge=1)
+    sku: Code
+    qty: Quantity
 
 
 class CreateOrderRequest(BaseModel):
-    order_ref: NonEmptyStr
-    customer_id: NonEmptyStr
-    items: list[OrderItemIn] = Field(min_length=1)
+    order_ref: Code
+    customer_id: Code
+    items: list[OrderItemIn] = Field(min_length=1, max_length=100)
 
     @field_validator("items")
     @classmethod

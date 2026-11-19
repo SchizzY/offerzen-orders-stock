@@ -1,7 +1,10 @@
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 
 from app import health
 from app.catalog.router import router as catalog_router
@@ -17,8 +20,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await engine.dispose()
 
 
+async def validation_error(_: Request, exc: RequestValidationError) -> Response:
+    # Errors echo the rejected input; ASCII escaping keeps a lone surrogate encodable.
+    return Response(
+        json.dumps({"detail": jsonable_encoder(exc.errors())}, separators=(",", ":")),
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        media_type="application/json",
+    )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Orders & Stock", lifespan=lifespan)
+    app.add_exception_handler(RequestValidationError, validation_error)
     app.include_router(health.router)
     app.include_router(catalog_router)
     app.include_router(orders_router)

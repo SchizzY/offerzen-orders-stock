@@ -1,10 +1,12 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
+
+from app.types import Code, Label, NonNegativeInt32
 
 
 class Product(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    sku: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    price_cents: int = Field(ge=0)
-    stock: int = Field(ge=0)
+    sku: Code
+    name: Label
+    price_cents: NonNegativeInt32
+    stock: NonNegativeInt32

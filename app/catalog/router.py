@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, status
 from app.catalog import controller, schemas
 from app.catalog.models import Product
 from app.db import SessionDep
+from app.types import Code
 
 router = APIRouter(prefix="/products", tags=["catalog"])
 
@@ -20,7 +21,7 @@ async def list_products(session: SessionDep) -> Sequence[Product]:
 
 
 @router.get("/{sku}", response_model=schemas.Product)
-async def get_product(sku: str, session: SessionDep) -> Product:
+async def get_product(sku: Code, session: SessionDep) -> Product:
     product = await controller.get_product(session, sku)
     if product is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"product {sku!r} not found")

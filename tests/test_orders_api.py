@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -117,32 +118,112 @@ async def test_unknown_sku_is_rejected_and_leaves_nothing_behind(client: AsyncCl
     assert (await client.post("/orders", json=ORDER)).status_code == 201
 
 
+INT32_MAX = 2_147_483_647
+
+
+def item(qty: Any = 1, sku: str = "BAN-001") -> dict[str, Any]:
+    return {"items": [{"sku": sku, "qty": qty}]}
+
+
 @pytest.mark.parametrize(
-    "change",
+    ("change", "loc"),
     [
-        {"order_ref": ""},
-        {"order_ref": "   "},
-        {"customer_id": ""},
-        {"items": []},
-        {"items": [{"sku": "", "qty": 1}]},
-        {"items": [{"sku": "BAN-001", "qty": 0}]},
-        {"items": [{"sku": "BAN-001", "qty": 1}, {"sku": "BAN-001", "qty": 2}]},
+        ({"order_ref": ""}, ["body", "order_ref"]),
+        ({"order_ref": "   "}, ["body", "order_ref"]),
+        ({"order_ref": "web\x00100045"}, ["body", "order_ref"]),
+        ({"order_ref": "web-\ud800"}, ["body", "order_ref"]),
+        ({"order_ref": "web/2026/001"}, ["body", "order_ref"]),
+        ({"order_ref": "r" * 65}, ["body", "order_ref"]),
+        ({"order_ref": "r" * 4000}, ["body", "order_ref"]),
+        ({"customer_id": ""}, ["body", "customer_id"]),
+        ({"customer_id": "cust\x0042"}, ["body", "customer_id"]),
+        ({"items": []}, ["body", "items"]),
+        ({"items": [{"sku": f"SKU-{n}", "qty": 1} for n in range(101)]}, ["body", "items"]),
+        (item(sku=""), ["body", "items", 0, "sku"]),
+        (item(sku="BAN\x00001"), ["body", "items", 0, "sku"]),
+        (item(qty=0), ["body", "items", 0, "qty"]),
+        (item(qty=10_001), ["body", "items", 0, "qty"]),
+        (item(qty=INT32_MAX + 1), ["body", "items", 0, "qty"]),
+        (item(qty=True), ["body", "items", 0, "qty"]),
+        (item(qty=1.0), ["body", "items", 0, "qty"]),
+        (
+            {"items": [{"sku": "BAN-001", "qty": 1}, {"sku": "BAN-001", "qty": 2}]},
+            ["body", "items"],
+        ),
     ],
     ids=[
         "empty-order-ref",
         "blank-order-ref",
+        "nul-in-order-ref",
+        "lone-surrogate-in-order-ref",
+        "slash-in-order-ref",
+        "order-ref-65-chars",
+        "order-ref-4000-chars",
         "empty-customer",
+        "nul-in-customer",
         "no-items",
+        "101-items",
         "empty-sku",
+        "nul-in-sku",
         "zero-qty",
+        "qty-over-10000",
+        "qty-over-int32",
+        "qty-bool",
+        "qty-float",
         "duplicate-sku",
     ],
 )
-async def test_invalid_order_is_rejected(client: AsyncClient, change: dict[str, Any]) -> None:
-    response = await client.post("/orders", json={**ORDER, **change})
+async def test_invalid_order_is_rejected(
+    client: AsyncClient, change: dict[str, Any], loc: list[str | int]
+) -> None:
+    # ensure_ascii keeps a lone surrogate as a JSON escape, as a real client would send it.
+    response = await client.post(
+        "/orders",
+        content=json.dumps({**ORDER, **change}),
+        headers={"Content-Type": "application/json"},
+    )
 
     assert response.status_code == 422
+    assert loc in [error["loc"] for error in response.json()["detail"]]
     assert await count(Order) == 0
+
+
+async def test_order_accepts_the_largest_quantity(client: AsyncClient) -> None:
+    response = await client.post("/orders", json={**ORDER, **item(qty=10_000)})
+
+    assert response.status_code == 201
+    assert response.json()["total_cents"] == 10_000 * 199
+
+
+@pytest.mark.parametrize(
+    "order_ref", ["%00", "web%20100045", ".web"], ids=["nul", "space", "leading-dot"]
+)
+async def test_get_with_a_malformed_order_ref_returns_422(
+    client: AsyncClient, order_ref: str
+) -> None:
+    response = await client.get(f"/orders/{order_ref}")
+
+    assert response.status_code == 422
+    assert [error["loc"] for error in response.json()["detail"]] == [["path", "order_ref"]]
+
+
+async def test_replay_after_a_price_change_returns_the_original_order(
+    client: AsyncClient,
+) -> None:
+    first = await client.post("/orders", json=ORDER)
+    (await client.post("/products", json={**BANANAS, "price_cents": 999})).raise_for_status()
+
+    replay = await client.post("/orders", json=ORDER)
+
+    assert first.status_code == 201
+    assert replay.status_code == 200
+    assert replay.headers["Idempotent-Replay"] == "true"
+    assert replay.json() == first.json()
+    assert replay.json()["total_cents"] == 2 * 199 + 349
+    assert {line["sku"]: line["unit_price_cents"] for line in replay.json()["items"]} == {
+        "APL-003": 349,
+        "BAN-001": 199,
+    }
 
 
 async def test_get_unknown_order_returns_404(client: AsyncClient) -> None:

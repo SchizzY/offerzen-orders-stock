@@ -6,6 +6,7 @@ from app.db import SessionDep
 from app.orders import controller
 from app.orders.controller import Conflict, Created, Replayed, UnknownSkus
 from app.orders.schemas import CreateOrderRequest, OrderDetail
+from app.types import Code
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -64,7 +65,7 @@ async def create_order(
 
 
 @router.get("/{order_ref}")
-async def get_order(order_ref: str, session: SessionDep) -> OrderDetail:
+async def get_order(order_ref: Code, session: SessionDep) -> OrderDetail:
     order = await controller.get_order(session, order_ref)
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"order {order_ref!r} not found")
