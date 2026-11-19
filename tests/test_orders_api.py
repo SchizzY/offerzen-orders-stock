@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.db import Base, SessionLocal
 from app.orders.models import Order, OrderItem, OutboxEvent
@@ -28,6 +28,10 @@ async def products(client: AsyncClient) -> None:
 async def count(model: type[Base]) -> int:
     async with SessionLocal() as session:
         return (await session.execute(select(func.count()).select_from(model))).scalar_one()
+
+
+def without_stock_status(order: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in order.items() if key != "stock_status"}
 
 
 async def test_create_prices_each_line_from_the_catalog(client: AsyncClient) -> None:
@@ -66,8 +70,20 @@ async def test_accepted_order_writes_one_outbox_event_with_the_order(client: Asy
 
     assert event.event_type == "order.accepted"
     assert event.aggregate_id == order_id
-    assert event.payload == body
-    assert event.processed_at is None
+    assert event.payload == without_stock_status(body)
+    assert event.seq is None
+    assert event.published_at is None
+
+
+async def test_new_order_reports_pending_stock_but_its_event_omits_it(client: AsyncClient) -> None:
+    created = (await client.post("/orders", json=ORDER)).json()
+
+    async with SessionLocal() as session:
+        payload = (await session.execute(select(OutboxEvent.payload))).scalar_one()
+
+    assert created["stock_status"] == "pending"
+    assert (await client.get("/orders/web-100045")).json()["stock_status"] == "pending"
+    assert "stock_status" not in payload
 
 
 @pytest.mark.parametrize(
@@ -84,7 +100,7 @@ async def test_duplicate_submission_replays_the_original_order(
     assert first.status_code == 201
     assert second.status_code == 200
     assert second.headers["Idempotent-Replay"] == "true"
-    assert second.json() == first.json()
+    assert without_stock_status(second.json()) == without_stock_status(first.json())
     assert await count(Order) == 1
     assert await count(OrderItem) == 2
     assert await count(OutboxEvent) == 1
@@ -261,12 +277,25 @@ async def test_replay_after_a_price_change_returns_the_original_order(
     assert first.status_code == 201
     assert replay.status_code == 200
     assert replay.headers["Idempotent-Replay"] == "true"
-    assert replay.json() == first.json()
+    assert without_stock_status(replay.json()) == without_stock_status(first.json())
     assert replay.json()["total_cents"] == 2 * 199 + 349
     assert {line["sku"]: line["unit_price_cents"] for line in replay.json()["items"]} == {
         "APL-003": 349,
         "BAN-001": 199,
     }
+
+
+async def test_replay_reports_the_current_stock_status(client: AsyncClient) -> None:
+    first = (await client.post("/orders", json=ORDER)).json()
+    async with SessionLocal() as session, session.begin():
+        await session.execute(update(Order).values(stock_status="reserved"))
+
+    replay = await client.post("/orders", json=ORDER)
+
+    assert replay.status_code == 200
+    assert first["stock_status"] == "pending"
+    assert replay.json()["stock_status"] == "reserved"
+    assert without_stock_status(replay.json()) == without_stock_status(first)
 
 
 async def test_get_unknown_order_returns_404(client: AsyncClient) -> None:
@@ -280,7 +309,8 @@ async def test_concurrent_duplicates_count_once(client: AsyncClient) -> None:
 
     assert sorted(r.status_code for r in responses) == [200] * 9 + [201]
     assert sorted(r.headers["Idempotent-Replay"] for r in responses) == ["false"] + ["true"] * 9
-    assert all(r.json() == responses[0].json() for r in responses)
+    first = without_stock_status(responses[0].json())
+    assert all(without_stock_status(r.json()) == first for r in responses)
     assert await count(Order) == 1
     assert await count(OrderItem) == 2
     assert await count(OutboxEvent) == 1

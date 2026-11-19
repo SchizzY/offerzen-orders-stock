@@ -80,7 +80,7 @@ async def create_order(session: AsyncSession, request: CreateOrderRequest) -> Cr
             OutboxEvent(
                 event_type=ORDER_ACCEPTED,
                 aggregate_id=order.id,
-                payload=detail.model_dump(mode="json"),
+                payload=detail.model_dump(mode="json", exclude={"stock_status"}),
             )
         )
     return Created(detail)
@@ -114,6 +114,7 @@ def _detail(order: Order, lines: Iterable[PricedLine]) -> OrderDetail:
         order_ref=order.order_ref,
         customer_id=order.customer_id,
         status=order.status,
+        stock_status=order.stock_status,
         total_cents=order.total_cents,
         created_at=order.created_at,
         items=[
