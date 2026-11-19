@@ -9,6 +9,14 @@ if [[ ! "${test_db}" =~ ^[a-z0-9_]+_test$ ]]; then
 fi
 export DATABASE_URL="postgresql+asyncpg://orders:orders@localhost:55432/${test_db}"
 
+test_valkey_db="${TEST_VALKEY_DB:-15}"
+if [[ ! "${test_valkey_db}" =~ ^([1-9]|1[0-5])$ ]]; then
+  echo "TEST_VALKEY_DB must be an integer from 1 to 15, got '${test_valkey_db}'" >&2
+  exit 2
+fi
+export VALKEY_URL="redis://localhost:56379/${test_valkey_db}"
+export RELAY_ENABLED=false
+
 docker compose up -d --wait
 
 exists=$(docker compose exec -T postgres psql -U orders -d orders -tAc \

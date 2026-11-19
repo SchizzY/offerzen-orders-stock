@@ -2,6 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.orders.domain import StockStatus
 from app.types import Code, Quantity
 
 
@@ -36,6 +37,7 @@ class OrderDetail(BaseModel):
     order_ref: str
     customer_id: str
     status: str
+    stock_status: StockStatus
     total_cents: int
     items: list[OrderItemOut]
     created_at: datetime
