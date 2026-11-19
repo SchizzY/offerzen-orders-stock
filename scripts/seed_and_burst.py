@@ -9,6 +9,7 @@ the idempotency contract, so it doubles as a smoke check against a running API.
 import argparse
 import asyncio
 import os
+import secrets
 import sys
 import time
 from collections import Counter
@@ -85,10 +86,10 @@ async def run(base_url: str, prefix: str, fixed_refs: bool) -> bool:
         burst = build_burst(prefix)
         outcomes = await asyncio.gather(*(submit(client, s) for s in burst))
 
-        print(f"{'order_ref':<26} {'try':>3} {'status':>6}  replay")
+        print(f"{'order_ref':<34} {'try':>3} {'status':>6}  replay")
         for o in outcomes:
             print(
-                f"{o.submission.order_ref:<26} {o.submission.attempt:>3} "
+                f"{o.submission.order_ref:<34} {o.submission.attempt:>3} "
                 f"{o.status:>6}  {o.replay or '-'}"
             )
 
@@ -100,7 +101,7 @@ async def run(base_url: str, prefix: str, fixed_refs: bool) -> bool:
 
     ok = True
     print(
-        f"\n{'order_ref':<26} {'sent':>4} {'201':>3} {'200':>3} {'409':>3} "
+        f"\n{'order_ref':<34} {'sent':>4} {'201':>3} {'200':>3} {'409':>3} "
         f"{'total_cents':>11}  verdict"
     )
     for ref in refs:
@@ -111,7 +112,7 @@ async def run(base_url: str, prefix: str, fixed_refs: bool) -> bool:
         total = stored[ref]["total_cents"] if stored[ref] else "-"
         verdict = "ok" if not problems else "FAIL: " + "; ".join(problems)
         print(
-            f"{ref:<26} {len(mine):>4} {counts[201]:>3} {counts[200]:>3} {counts[409]:>3} "
+            f"{ref:<34} {len(mine):>4} {counts[201]:>3} {counts[200]:>3} {counts[409]:>3} "
             f"{total:>11}  {verdict}"
         )
     return ok
@@ -145,7 +146,10 @@ def main() -> int:
         help="reuse stable order_refs to show replays across runs",
     )
     args = parser.parse_args()
-    prefix = "DEMO" if args.fixed_refs else time.strftime("RUN%Y%m%d-%H%M%S")
+    if args.fixed_refs:
+        prefix = "DEMO"
+    else:
+        prefix = f"{time.strftime('RUN%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
     try:
         ok = asyncio.run(run(args.base_url, prefix, args.fixed_refs))
     except httpx.HTTPError as exc:
