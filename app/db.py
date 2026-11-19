@@ -21,7 +21,15 @@ class Base(DeclarativeBase):
     )
 
 
-engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+engine = create_async_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    hide_parameters=True,
+    connect_args={
+        "timeout": settings.db_connect_timeout_seconds,
+        "command_timeout": settings.db_command_timeout_seconds,
+    },
+)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 

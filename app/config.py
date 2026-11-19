@@ -6,6 +6,8 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://orders:orders@localhost:55432/orders"
     valkey_url: str = "redis://localhost:56379/0"
+    db_connect_timeout_seconds: float = 5
+    db_command_timeout_seconds: float = 10
 
 
 settings = Settings()
