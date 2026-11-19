@@ -188,6 +188,25 @@ async def test_invalid_order_is_rejected(
     assert await count(Order) == 0
 
 
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "1e999"])
+async def test_rejection_of_non_finite_number_is_standard_json(
+    client: AsyncClient, literal: str
+) -> None:
+    body = json.dumps({**ORDER, "items": [{"sku": "BAN-001", "qty": 0}]}).replace(
+        '"qty": 0', f'"qty": {literal}'
+    )
+    response = await client.post(
+        "/orders", content=body, headers={"Content-Type": "application/json"}
+    )
+
+    def reject(constant: str) -> None:
+        raise ValueError(f"non-standard JSON constant {constant}")
+
+    assert response.status_code == 422
+    detail = json.loads(response.text, parse_constant=reject)["detail"]
+    assert ["body", "items", 0, "qty"] in [error["loc"] for error in detail]
+
+
 async def test_order_accepts_the_largest_quantity(client: AsyncClient) -> None:
     response = await client.post("/orders", json={**ORDER, **item(qty=10_000)})
 

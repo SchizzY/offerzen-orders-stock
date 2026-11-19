@@ -1,4 +1,5 @@
 import json
+import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -20,10 +21,22 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await engine.dispose()
 
 
+def _standard_json(value: object) -> object:
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _standard_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_standard_json(item) for item in value]
+    return value
+
+
 async def validation_error(_: Request, exc: RequestValidationError) -> Response:
-    # Errors echo the rejected input; ASCII escaping keeps a lone surrogate encodable.
+    # Errors echo the rejected input; ASCII escaping keeps a lone surrogate encodable,
+    # and non-finite floats become strings because NaN/Infinity are not JSON.
+    detail = _standard_json(jsonable_encoder(exc.errors()))
     return Response(
-        json.dumps({"detail": jsonable_encoder(exc.errors())}, separators=(",", ":")),
+        json.dumps({"detail": detail}, separators=(",", ":"), allow_nan=False),
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         media_type="application/json",
     )
