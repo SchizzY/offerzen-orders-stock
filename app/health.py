@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import Awaitable
 
 from fastapi import APIRouter, Response, status
@@ -9,14 +10,19 @@ from app.valkey import ValkeyDep
 
 PROBE_TIMEOUT_SECONDS = 2
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["health"])
 
 
-async def _probe(check: Awaitable[object]) -> str:
+async def _probe(dependency: str, check: Awaitable[object]) -> str:
     try:
         async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
             await check
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "health probe failed: dependency=%s error=%s", dependency, type(exc).__name__
+        )
         return "unavailable"
     return "ok"
 
@@ -24,8 +30,8 @@ async def _probe(check: Awaitable[object]) -> str:
 @router.get("/health")
 async def health(session: SessionDep, valkey: ValkeyDep, response: Response) -> dict[str, str]:
     postgres_status, valkey_status = await asyncio.gather(
-        _probe(session.execute(text("SELECT 1"))),
-        _probe(valkey.ping()),
+        _probe("postgres", session.execute(text("SELECT 1"))),
+        _probe("valkey", valkey.ping()),
     )
     checks = {"postgres": postgres_status, "valkey": valkey_status}
     if any(result != "ok" for result in checks.values()):
