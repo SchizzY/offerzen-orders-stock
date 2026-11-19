@@ -1,5 +1,22 @@
-from pydantic import Field
+from typing import Annotated, Literal
+
+from pydantic import BeforeValidator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+STDLIB_LEVEL_ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL"}
+
+
+def _normalise_level(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    name = value.strip().upper()
+    return STDLIB_LEVEL_ALIASES.get(name, name)
+
+
+LogLevel = Annotated[
+    Literal["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"],
+    BeforeValidator(_normalise_level),
+]
 
 
 class Settings(BaseSettings):
@@ -18,7 +35,7 @@ class Settings(BaseSettings):
     relay_batch_size: int = Field(default=100, ge=1, le=1000)
     poll_interval_seconds: float = Field(default=0.5, gt=0, allow_inf_nan=False)
 
-    log_level: str = "INFO"
+    log_level: LogLevel = "INFO"
     log_json: bool = False
 
 
