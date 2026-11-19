@@ -17,6 +17,7 @@ class Order(Base):
         CheckConstraint(
             "stock_status IN ('pending', 'reserved', 'insufficient')", name="stock_status_known"
         ),
+        Index("ix_orders_stock_pending", "id", postgresql_where=text("stock_status = 'pending'")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

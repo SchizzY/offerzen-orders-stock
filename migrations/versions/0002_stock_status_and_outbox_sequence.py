@@ -27,6 +27,12 @@ def upgrade() -> None:
         "orders",
         "stock_status IN ('pending', 'reserved', 'insufficient')",
     )
+    op.create_index(
+        op.f("ix_orders_stock_pending"),
+        "orders",
+        ["id"],
+        postgresql_where=sa.text("stock_status = 'pending'"),
+    )
     op.alter_column("outbox_events", "processed_at", new_column_name="published_at")
     op.add_column("outbox_events", sa.Column("seq", sa.BigInteger(), nullable=True))
     op.create_unique_constraint(op.f("uq_outbox_events_seq"), "outbox_events", ["seq"])
@@ -43,5 +49,6 @@ def downgrade() -> None:
     op.drop_constraint(op.f("uq_outbox_events_seq"), "outbox_events", type_="unique")
     op.drop_column("outbox_events", "seq")
     op.alter_column("outbox_events", "published_at", new_column_name="processed_at")
+    op.drop_index(op.f("ix_orders_stock_pending"), table_name="orders")
     op.drop_constraint(op.f("ck_orders_stock_status_known"), "orders", type_="check")
     op.drop_column("orders", "stock_status")

@@ -102,9 +102,25 @@ async def test_0002_keeps_phase_1_rows_through_upgrade_downgrade_and_upgrade(
         (2, None, PUBLISHED),
     ]
     assert await scratch.rows("SELECT count(*) FROM order_items") == [(2,)]
+    for status in ("reserved", "insufficient", "pending"):
+        async with scratch.engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE orders SET stock_status = :status"), {"status": status}
+            )
     with pytest.raises(IntegrityError):
         async with scratch.engine.begin() as connection:
             await connection.execute(text("UPDATE orders SET stock_status = 'shipped'"))
+    assert await scratch.rows(
+        "SELECT pg_get_indexdef('ix_outbox_events_unsequenced'::regclass),"
+        " pg_get_indexdef('ix_orders_stock_pending'::regclass)"
+    ) == [
+        (
+            "CREATE INDEX ix_outbox_events_unsequenced ON public.outbox_events"
+            " USING btree (id) WHERE (seq IS NULL)",
+            "CREATE INDEX ix_orders_stock_pending ON public.orders"
+            " USING btree (id) WHERE (stock_status = 'pending'::text)",
+        )
+    ]
     await scratch.alembic(command.check)
 
     await scratch.alembic(command.downgrade, "0001")
