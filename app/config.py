@@ -7,10 +7,19 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://orders:orders@localhost:55432/orders"
     valkey_url: str = "redis://localhost:56379/0"
-    db_connect_timeout_seconds: float = 5
-    db_command_timeout_seconds: float = 10
+    db_connect_timeout_seconds: float = Field(default=5, gt=0, allow_inf_nan=False)
+    db_command_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
     db_pool_size: int = Field(default=5, ge=1)
     db_max_overflow: int = Field(default=0, ge=0)
+
+    orders_stream: str = "orders.accepted"
+    stock_group: str = "stock"
+    relay_enabled: bool = True
+    relay_batch_size: int = Field(default=100, ge=1, le=1000)
+    poll_interval_seconds: float = Field(default=0.5, gt=0, allow_inf_nan=False)
+
+    log_level: str = "INFO"
+    log_json: bool = False
 
 
 settings = Settings()
