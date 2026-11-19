@@ -2,10 +2,12 @@ from collections.abc import AsyncGenerator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from redis.asyncio import Redis
 from sqlalchemy import text
 
 from app.db import engine
 from app.main import app
+from app.valkey import valkey as app_valkey
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +18,14 @@ async def clean_tables() -> None:
         await connection.execute(
             text("TRUNCATE products, orders, order_items, outbox_events RESTART IDENTITY CASCADE")
         )
+
+
+@pytest.fixture(autouse=True)
+async def valkey() -> Redis:
+    if app_valkey.connection_pool.connection_kwargs.get("db", 0) == 0:
+        pytest.exit("refusing to flush Valkey db 0; run tests via scripts/test.sh")
+    await app_valkey.flushdb()
+    return app_valkey
 
 
 @pytest.fixture
