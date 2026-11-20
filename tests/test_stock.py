@@ -2,13 +2,14 @@ import asyncio
 import json
 import random
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from loguru import logger
 from redis.asyncio import Redis
 from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -479,6 +480,100 @@ async def test_worker_retries_an_event_whose_transaction_failed_without_logging_
     output = "\n".join(logs)
     assert CUSTOMER not in output
     assert "Failing row" not in output
+
+
+@contextmanager
+def captured_levels() -> Iterator[list[tuple[str, str]]]:
+    records: list[tuple[str, str]] = []
+    handler_id = logger.add(
+        lambda message: records.append((message.record["level"].name, message.record["message"])),
+        level="TRACE",
+        filter="app.stock",
+    )
+    try:
+        yield records
+    finally:
+        logger.remove(handler_id)
+
+
+async def test_worker_creates_its_group_at_info_and_warns_only_when_it_is_lost_mid_run(
+    client: AsyncClient, valkey: Redis
+) -> None:
+    await add_product(client, "APL-1", 10)
+    await place_order(client, "web-1", {"APL-1": 3})
+    stop = asyncio.Event()
+
+    async def reserved() -> bool:
+        return await stock_status(client, "web-1") == "reserved"
+
+    async def group_logged() -> bool:
+        return any("group created" in m or "group missing" in m for _, m in logs)
+
+    with captured_levels() as logs:
+        worker = asyncio.create_task(run_worker(stop, "stock-test"))
+        await eventually(group_logged)
+        at_start = list(logs)
+        await destroy_group(valkey)
+        await publish(valkey, "web-1", 1)
+        await eventually(reserved)
+        stop.set()
+        await asyncio.wait_for(worker, 5)
+
+    assert [message for level, message in at_start if "group" in message and level != "INFO"] == []
+    assert any(level == "INFO" and "group created" in message for level, message in at_start)
+    lost = [message for level, message in logs[len(at_start) :] if level == "WARNING"]
+    assert len(lost) == 1
+    assert "group missing" in lost[0]
+
+
+async def consumers(valkey: Redis) -> dict[str, int]:
+    return {
+        consumer["name"].decode(): consumer["pending"]
+        for consumer in await valkey.xinfo_consumers(STREAM, GROUP)
+    }
+
+
+async def test_a_worker_that_stops_with_nothing_pending_leaves_the_group(
+    client: AsyncClient, valkey: Redis
+) -> None:
+    await add_product(client, "APL-1", 10)
+    await place_order(client, "web-1", {"APL-1": 3})
+    await place_order(client, "web-2", {"APL-1": 2})
+    await ensure_group(valkey)
+    await publish(valkey, "web-1", 1)
+    await crash_after_reading(valkey, "stock-other")
+    await publish(valkey, "web-2", 2)
+    stop = asyncio.Event()
+
+    async def reserved() -> bool:
+        return await stock_status(client, "web-2") == "reserved"
+
+    worker = asyncio.create_task(run_worker(stop, "stock-test"))
+    await eventually(reserved)
+    stop.set()
+    await asyncio.wait_for(worker, 5)
+
+    assert await consumers(valkey) == {"stock-other": 1}
+
+
+async def test_a_worker_that_stops_with_entries_pending_stays_in_the_group(
+    client: AsyncClient, valkey: Redis, orders_reject_stock_changes: None
+) -> None:
+    await add_product(client, "APL-1", 10)
+    await place_order(client, "web-1", {"APL-1": 3})
+    await publish(valkey, "web-1", 1)
+    stop = asyncio.Event()
+
+    async def failure_logged() -> bool:
+        return any("stock worker error" in message for _, message in logs)
+
+    with captured_levels() as logs:
+        worker = asyncio.create_task(run_worker(stop, "stock-test"))
+        await eventually(failure_logged)
+        stop.set()
+        await asyncio.wait_for(worker, 5)
+
+    assert await consumers(valkey) == {"stock-test": 1}
 
 
 async def test_stock_shows_on_hand_and_the_qty_still_waiting_for_the_worker(

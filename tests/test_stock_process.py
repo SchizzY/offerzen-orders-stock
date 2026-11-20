@@ -70,6 +70,7 @@ async def test_worker_process_applies_events_and_exits_cleanly_on_signal(
     assert "order_ref=web-1" in output
     assert "result=reserved" in output
     assert CUSTOMER not in output
+    assert await valkey.xinfo_consumers(STREAM, GROUP) == []
 
 
 @SIGNALS

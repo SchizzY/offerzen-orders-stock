@@ -21,6 +21,7 @@ BATCH_SIZE = 50
 CLAIM_IDLE_MS = 30_000
 BACKOFF_INITIAL_SECONDS = 0.5
 BACKOFF_MAX_SECONDS = 5.0
+LEAVE_TIMEOUT_SECONDS = 2.0
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 type Entry = tuple[bytes, dict[bytes, bytes]]
@@ -43,7 +44,8 @@ def parse_entry(fields: dict[bytes, bytes]) -> OrderAccepted:
     )
 
 
-async def ensure_group(valkey: Redis) -> None:
+async def ensure_group(valkey: Redis) -> bool:
+    """Create the group, reading from the stream's start. Return whether it was missing."""
     try:
         await valkey.xgroup_create(
             settings.orders_stream, settings.stock_group, id="0", mkstream=True
@@ -51,6 +53,22 @@ async def ensure_group(valkey: Redis) -> None:
     except ResponseError as exc:
         if not str(exc).startswith("BUSYGROUP"):
             raise
+        return False
+    return True
+
+
+async def leave_group(valkey: Redis, consumer: str) -> None:
+    """Drop this consumer from the group, unless entries still wait on it to be claimed."""
+    pending = await valkey.xpending_range(
+        settings.orders_stream,
+        settings.stock_group,
+        min="-",
+        max="+",
+        count=1,
+        consumername=consumer,
+    )
+    if not pending:
+        await valkey.xgroup_delconsumer(settings.orders_stream, settings.stock_group, consumer)
 
 
 async def consume_once(
@@ -127,8 +145,17 @@ async def run_worker(stop: asyncio.Event, consumer: str) -> None:
         settings.stock_group,
     )
     delay = BACKOFF_INITIAL_SECONDS
+    group_checked = False
     while not stop.is_set():
         try:
+            if not group_checked:
+                if await ensure_group(app_valkey):
+                    logger.info(
+                        "stock group created: stream={} group={}",
+                        settings.orders_stream,
+                        settings.stock_group,
+                    )
+                group_checked = True
             await consume_once(app_valkey, consumer)
         except Exception as exc:
             logger.warning(
@@ -139,6 +166,11 @@ async def run_worker(stop: asyncio.Event, consumer: str) -> None:
             delay = min(delay * 2, BACKOFF_MAX_SECONDS)
         else:
             delay = BACKOFF_INITIAL_SECONDS
+    try:
+        async with asyncio.timeout(LEAVE_TIMEOUT_SECONDS):
+            await leave_group(app_valkey, consumer)
+    except Exception as exc:
+        logger.warning("stock worker kept its consumer: error={}", type(exc).__name__)
     logger.info("stock worker stopped: consumer={}", consumer)
 
 
