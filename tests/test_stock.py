@@ -15,8 +15,8 @@ from app.config import settings
 from app.db import SessionLocal, engine
 from app.orders.models import Order, OrderItem, OutboxEvent
 from app.stock import controller
+from app.stock.consumer import consume_once, ensure_group, run_worker
 from app.stock.router import router as stock_router
-from app.stock.worker import consume_once, ensure_group, run_worker
 from tests.logs import captured_logs
 
 STREAM = settings.orders_stream
