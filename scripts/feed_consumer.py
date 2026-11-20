@@ -44,6 +44,11 @@ def load_cursor(path: Path) -> int:
         raw = path.read_text()
     except FileNotFoundError:
         return 0
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CursorError(
+            f"cursor file {path} cannot be read ({type(exc).__name__}); "
+            "fix or delete it, or pass --from-start"
+        ) from None
     digits = raw.strip()
     if not (digits.isascii() and digits.isdigit()):
         raise CursorError(

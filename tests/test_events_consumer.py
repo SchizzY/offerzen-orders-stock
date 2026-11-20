@@ -283,6 +283,23 @@ def test_a_corrupt_cursor_file_stops_with_an_error(tmp_path: Path, content: str)
     assert cursor_file.read_text() == content
 
 
+@pytest.mark.parametrize("unreadable", ["not-utf8", "no-permission"])
+def test_an_unreadable_cursor_file_stops_with_an_error(tmp_path: Path, unreadable: str) -> None:
+    cursor_file = tmp_path / "cursor"
+    cursor_file.write_bytes(b"\xff\xfe\x00")
+    if unreadable == "no-permission":
+        cursor_file.write_text("7\n")
+        cursor_file.chmod(0)
+    try:
+        result = run_cli(
+            "--once", "--cursor-file", str(cursor_file), "--base-url", "http://127.0.0.1:9"
+        )
+    finally:
+        cursor_file.chmod(0o600)
+
+    assert str(cursor_file) in assert_one_error_line(result, 2)
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))

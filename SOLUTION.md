@@ -206,7 +206,7 @@ Tests cover both crash points.
 
 Consumer names are `<hostname>-<pid>`, so a restarted worker has a new name. Without a claim step, the old name's unacknowledged entries would never be read again. Each round claims entries that have been idle for 30 seconds or more.
 
-On a clean stop, the worker finishes the entries it holds and removes its own consumer name from the group if no entries are pending on it. Dead names therefore do not pile up in `XINFO CONSUMERS`. A name that still has pending entries stays, so the next worker can claim them.
+On a clean stop, the worker finishes the entries it holds and removes its own consumer name from the group if no entries are pending on it. Cleanly stopped workers therefore leave no names behind in `XINFO CONSUMERS`. A worker killed with `SIGKILL` leaves its name; its entries are claimed after 30 seconds, and the idle name is harmless. A name that still has pending entries stays, so the next worker can claim them.
 
 ### Errors
 
