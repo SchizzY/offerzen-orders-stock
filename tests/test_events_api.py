@@ -1,33 +1,25 @@
-from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import text
 
 from app.db import engine
-from app.events.router import router as events_router
-from app.main import create_app
 
 BANANAS = {"sku": "BAN-001", "name": "Bananas 1kg", "price_cents": 199, "stock": 50}
 APPLES = {"sku": "APL-003", "name": "Apples 1kg", "price_cents": 349, "stock": 20}
 
 
-def feed_app() -> FastAPI:
-    app = create_app()
-    if not any(getattr(route, "path", None) == "/events" for route in app.routes):
-        app.include_router(events_router)
-    return app
+async def seed_products(client: AsyncClient) -> AsyncClient:
+    for product in (BANANAS, APPLES):
+        (await client.post("/products", json=product)).raise_for_status()
+    return client
 
 
 @pytest.fixture
-async def feed() -> AsyncGenerator[AsyncClient, None]:
-    async with AsyncClient(transport=ASGITransport(app=feed_app()), base_url="http://test") as c:
-        for product in (BANANAS, APPLES):
-            (await c.post("/products", json=product)).raise_for_status()
-        yield c
+async def feed(client: AsyncClient) -> AsyncClient:
+    return await seed_products(client)
 
 
 async def place(client: AsyncClient, order_ref: str, items: dict[str, int]) -> dict[str, Any]:
