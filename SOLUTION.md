@@ -272,7 +272,7 @@ A test suite proves little if it still passes when the code is wrong. I broke si
 | Lock with `FOR UPDATE` instead of `FOR NO KEY UPDATE` | `test_reserving_does_not_deadlock_with_an_order_being_placed_on_the_same_skus` |
 | Remove the `stock_status` guard in the worker | Seven tests in `tests/test_stock.py`, including `test_redelivering_the_whole_stream_changes_nothing`, `test_two_workers_racing_over_shared_skus_apply_every_order_once`, and the after-commit-before-ack case of `test_an_unacked_entry_is_applied_once_when_its_worker_resumes` |
 | Remove the SKU order from the product lock query | `test_reservations_whose_plans_read_skus_in_different_orders_do_not_deadlock`, in 12 of 20 runs. The race it sets up does not deadlock every time, so one run can miss this mutation. |
-| Remove the advisory lock from the sequencer | `test_concurrent_sequencers_number_each_event_exactly_once`, `test_orders_are_numbered_from_one_in_commit_order`, and two other relay tests |
+| Remove the advisory lock from the sequencer | `test_concurrent_sequencers_number_each_event_exactly_once`, `test_relay_publishes_what_it_sequences_while_the_publisher_waits_to_poll` and `test_shutdown_cancels_a_relay_stuck_on_a_postgres_lock` |
 | Put back the `WATCH` guard in place of the append script | `test_relay_publishes_as_fast_while_a_consumer_group_reads_and_acks` and `test_stream_lost_between_reading_its_top_and_writing_is_republished_whole` |
 | Remove `ON CONFLICT DO NOTHING` from order intake | Six tests in `tests/test_orders_api.py`, including `test_concurrent_duplicates_count_once` |
 
