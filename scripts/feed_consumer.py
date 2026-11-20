@@ -15,6 +15,7 @@ cannot fix it.
 import argparse
 import asyncio
 import os
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -166,6 +167,10 @@ def positive_float(raw: str) -> float:
     return value
 
 
+def _stop(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base-url", default=os.environ.get("BASE_URL", "http://localhost:8000"))
@@ -178,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--interval", type=positive_float, default=1.0, help="idle poll seconds")
     args = parser.parse_args(argv)
+    signal.signal(signal.SIGTERM, _stop)
     try:
         asyncio.run(run(args))
     except CursorError as exc:

@@ -255,16 +255,34 @@ def api() -> Iterator[Api]:
     api.stop()
 
 
+_demos: list[subprocess.Popen] = []
+
+
+@pytest.fixture(autouse=True)
+def kill_leftover_demos() -> Iterator[None]:
+    yield
+    # A failed or timed-out test must not leave the demo or its worker consuming the
+    # test Valkey db; both share the demo's own process group.
+    while _demos:
+        proc = _demos.pop()
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+
+
 def run_demo(api: Api) -> subprocess.Popen:
     # Unbuffered bytes, so select() sees every line the script has written.
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [sys.executable, SCRIPT, "--base-url", api.url],
         cwd=ROOT,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=0,
+        start_new_session=True,
     )
+    _demos.append(proc)
+    return proc
 
 
 def finish(proc: subprocess.Popen) -> tuple[str, str]:

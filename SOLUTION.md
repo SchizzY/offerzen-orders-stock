@@ -137,7 +137,7 @@ In each loop, a round that filled a batch starts the next round at once. Otherwi
 
 ### Why not use `outbox_events.id` as the cursor
 
-A bigserial id is taken at insert time, before the transaction commits. Transaction A takes id 10. Transaction B takes id 11 and commits first. A reader that sees 11 moves its cursor past 10, and when A commits, the reader never sees event 10. The Phase 1 final review measured 2 to 3 missed events out of 3,000 with 4 concurrent workers.
+A bigserial id is taken at insert time, before the transaction commits. Transaction A takes id 10. Transaction B takes id 11 and commits first. A reader that sees 11 moves its cursor past 10, and when A commits, the reader never sees event 10. Measured against this schema, a reader paging by id missed 2 to 3 events out of 3,000 with 4 concurrent API workers.
 
 `seq` is assigned only to rows that are already committed, by one sequencer at a time. When a reader sees `seq` N, every lower `seq` is already visible, and no later commit can take a lower number. `test_uncommitted_event_waits_and_takes_the_next_seq_once_committed` holds an insert open while another order commits. The open event has the lower `id`, but it gets `seq` 3 after the other order's `seq` 2.
 
@@ -151,7 +151,7 @@ The entry id is `<seq>-0`. Valkey rejects an `XADD` whose id is not above the st
 
 The batch goes in through one Lua script, `_APPEND_AT_TOP`, which the relay loads with `register_script`. Valkey runs a script atomically. The script compares the stream's last generated id with the top that the relay read before its Postgres query. If they match, it adds the whole batch with `XADD`. If they differ, it writes nothing, and the relay starts the round again at once from the stream's real end. Without the check, a stream deleted in the middle of a round could receive `seq` 11 onward with 1 to 10 missing, and the worker would never see orders 1 to 10. A second relay that publishes first also fails the check.
 
-The first version used `WATCH` on the stream key with `MULTI` and `EXEC`. Consumer group commands such as `XREADGROUP`, `XACK` and `XAUTOCLAIM` also count as changes to the key. With a worker running, most rounds aborted and the relay slept a poll interval after each one. The review measured publishing 20 to 30 times slower. `test_relay_publishes_as_fast_while_a_consumer_group_reads_and_acks` publishes 5,000 events while another connection reads and acknowledges them. It fails if that takes more than three times as long as publishing alone, plus 1 second.
+`WATCH` on the stream key with `MULTI` and `EXEC` looks like the obvious guard, but consumer group commands such as `XREADGROUP`, `XACK` and `XAUTOCLAIM` also count as changes to the key. With a worker running, most rounds would abort; measured, publishing ran 20 to 30 times slower. `test_relay_publishes_as_fast_while_a_consumer_group_reads_and_acks` publishes 5,000 events while another connection reads and acknowledges them. It fails if that takes more than three times as long as publishing alone, plus 1 second.
 
 ### Republish after the stream is lost
 
@@ -159,7 +159,7 @@ If the stream key is gone, its last id counts as 0 and the relay republishes eve
 
 ## Stock worker
 
-`python -m app.stock.worker` starts the worker. `app/stock/worker.py` is a thin entry point. Before its slow imports, it installs `SIGINT` and `SIGTERM` handlers that exit 0. It then runs the consumer in `app/stock/consumer.py`. A stop signal therefore exits 0 at any point, including start-up and interpreter shutdown.
+`python -m app.stock.worker` starts the worker. `app/stock/worker.py` is a thin entry point. Before its slow imports, it installs `SIGINT` and `SIGTERM` handlers that exit 0. It then runs the consumer in `app/stock/consumer.py`. Once the interpreter has started running the module, a stop signal exits 0, including during the slow imports and interpreter shutdown. A signal in the first few milliseconds, before Python executes any code, still ends the process by the signal; nothing is in flight then.
 
 The consumer reads the stream through the `stock` consumer group, 50 entries at a time. Before its first read, it creates the group if the group is missing, reading from the start of the stream, and logs `stock group created` at `INFO`. Each round of its loop does three things:
 
@@ -278,7 +278,7 @@ A test suite proves little if it still passes when the code is wrong. I broke si
 
 ### Review loop
 
-I built the system with AI coding agents, in small units with a written design for each phase. The assignment allows such tools. A fresh reviewer with no context from the build then reviewed each unit cold. Every finding was reproduced before it was fixed. Findings that did not justify a change were declined, and the reason was recorded. The reviews caught real defects, for example:
+I built the system with AI coding agents, in small units with a written design for each phase. The assignment allows such tools. A fresh reviewer with no context from the build then reviewed each unit cold. Every finding was checked against a real run or the code before it was fixed. Findings that did not justify a change were declined, and the reason was recorded. The reviews caught real defects, for example:
 
 - Concurrent load exhausted Postgres connections, so the connection pool is now bounded and configurable.
 - Postgres error details put customer ids into logs. The fix is the logging patcher.
@@ -292,7 +292,7 @@ I built the system with AI coding agents, in small units with a written design f
 
 - **Idempotency lock in Valkey (`SET NX`).** Rejected. It would create a second owner of the truth. A lock that expires, or a Valkey restart, would let a duplicate through. The unique constraint lives in the same transaction as the insert and cannot disagree with it.
 - **Check stock synchronously in `POST /orders`.** Rejected. The assignment says orders must be accepted while stock is unreachable. A synchronous check would also tie intake latency to stock.
-- **Stock worker polls the Postgres outbox directly** (`FOR UPDATE SKIP LOCKED`, no Valkey). Polling is simpler, with one store and no relay, and the Phase 1 review found that it lost nothing. I chose the stream instead. Consumer groups give delivery tracking, pending lists and claiming without new tables. Another service can add its own consumer group without touching Postgres. The stream is also where stock would split off into its own database. The cost is a second store to run, the relay, and one new failure mode, described under known limitations. Postgres still holds everything needed to fall back to polling.
+- **Stock worker polls the Postgres outbox directly** (`FOR UPDATE SKIP LOCKED`, no Valkey). Polling is simpler, with one store and no relay, and a `FOR UPDATE SKIP LOCKED` poller over this schema lost nothing in testing. I chose the stream instead. Consumer groups give delivery tracking, pending lists and claiming without new tables. Another service can add its own consumer group without touching Postgres. The stream is also where stock would split off into its own database. The cost is a second store to run, the relay, and one new failure mode, described under known limitations. Postgres still holds everything needed to fall back to polling.
 - **Webhook for Option A.** Not chosen for the first version. See the feed section.
 - **Option B, the daily report.** Not chosen. See the feed section.
 - **One process.** The assignment allows a single process with a background worker. I split the stock worker into its own process, so the outage demo stops a real process and the stock capability can be deployed and scaled on its own. The relay stays in the API process, because it belongs to the orders capability.

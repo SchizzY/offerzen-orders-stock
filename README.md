@@ -69,7 +69,7 @@ You do not need a `.env` file. The defaults match the Compose ports. To change a
 
 The interactive API docs are at http://localhost:8000/docs.
 
-Stop each process with Ctrl+C. `make down` stops the containers and keeps the data. `make reset` also deletes the volumes, and with them every database in that Postgres.
+Stop each process with Ctrl+C or `SIGTERM`; each exits 0. `make down` stops the containers and keeps the data. `make reset` also deletes the volumes, and with them every database in that Postgres.
 
 ### Make targets
 
@@ -197,7 +197,7 @@ The examples below use the products that `make demo-duplicates` seeds. Values su
 | --- | --- |
 | `404` | `{"detail": "product 'NOPE' not found"}` |
 | `409` | `{"detail": {"message": "...", "order_ref": "..."}}` |
-| `422` | `{"detail": [{"type": "...", "loc": [...], "msg": "..."}]}`. Validation errors do not echo the rejected input. |
+| `422` | `{"detail": [{"type": "...", "loc": [...], "msg": "..."}]}`. Validation errors do not echo the rejected input, except an unknown or duplicate SKU, which is named. |
 | `500` | `{"detail": "internal server error"}` |
 
 ### GET /health

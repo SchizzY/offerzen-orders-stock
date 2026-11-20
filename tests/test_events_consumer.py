@@ -427,8 +427,13 @@ def dead_url() -> str:
     [("dead_url", "ConnectError"), ("html_server", "not the event feed")],
     ids=["connection-refused", "not-the-feed"],
 )
-def test_follow_keeps_retrying_and_exits_cleanly_on_sigint(
-    request: pytest.FixtureRequest, tmp_path: Path, target: str, reason: str
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM], ids=["sigint", "sigterm"])
+def test_follow_keeps_retrying_and_exits_cleanly_on_a_stop_signal(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    target: str,
+    reason: str,
+    signum: signal.Signals,
 ) -> None:
     base_url = request.getfixturevalue(target)
     process = subprocess.Popen(
@@ -455,7 +460,7 @@ def test_follow_keeps_retrying_and_exits_cleanly_on_sigint(
             assert ready, "no error line on stderr"
             errors.append(process.stderr.readline())
         assert process.poll() is None
-        process.send_signal(signal.SIGINT)
+        process.send_signal(signum)
         stdout, stderr = process.communicate(timeout=10)
     finally:
         process.kill()
