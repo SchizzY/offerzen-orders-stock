@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -9,15 +10,24 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import health
 from app.catalog.router import router as catalog_router
+from app.config import settings
 from app.db import engine
+from app.events.router import router as events_router
 from app.logging import describe_error, setup_logging
+from app.orders.relay import run_relay
 from app.orders.router import router as orders_router
+from app.stock.router import router as stock_router
 from app.valkey import valkey
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+    stop = asyncio.Event()
+    relay = asyncio.create_task(run_relay(stop)) if settings.relay_enabled else None
     yield
+    stop.set()
+    if relay is not None:
+        await relay
     await valkey.aclose()
     await engine.dispose()
 
@@ -80,6 +90,8 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(catalog_router)
     app.include_router(orders_router)
+    app.include_router(stock_router)
+    app.include_router(events_router)
     return app
 
 
