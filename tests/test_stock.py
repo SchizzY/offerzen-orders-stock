@@ -2,7 +2,8 @@ import asyncio
 import json
 import random
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -10,7 +11,9 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis
 from sqlalchemy import insert, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.catalog.models import Product
 from app.config import settings
 from app.db import SessionLocal, engine
 from app.orders.models import Order, OrderItem, OutboxEvent
@@ -274,6 +277,63 @@ async def test_reserving_does_not_deadlock_with_an_order_being_placed_on_the_sam
     assert await on_hand(client, "APL-1") == 9
     assert await on_hand(client, "BAN-1") == 9
     assert await stock_status(client, "web-1") == "reserved"
+
+
+@asynccontextmanager
+async def sessions_planned(**planner: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    planned = create_async_engine(settings.database_url, connect_args={"server_settings": planner})
+    try:
+        yield async_sessionmaker(planned, expire_on_commit=False)
+    finally:
+        await planned.dispose()
+
+
+async def order_id(order_ref: str) -> uuid.UUID:
+    async with SessionLocal() as session:
+        return (await session.scalars(select(Order.id).where(Order.order_ref == order_ref))).one()
+
+
+async def test_reservations_whose_plans_read_skus_in_different_orders_do_not_deadlock(
+    client: AsyncClient,
+) -> None:
+    # Inserted out of sku order, so a sequential scan meets BAN-1 first and an index scan APL-1.
+    await add_product(client, "BAN-1", 10)
+    await add_product(client, "APL-1", 10)
+    await place_order(client, "web-1", {"APL-1": 1, "BAN-1": 1})
+    await place_order(client, "web-2", {"APL-1": 1, "BAN-1": 1})
+
+    async def both_waiting() -> bool:
+        async with engine.connect() as connection:
+            waiting = await connection.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            )
+        return waiting == 2
+
+    async with (
+        sessions_planned(enable_seqscan="off", enable_bitmapscan="off") as by_index,
+        sessions_planned(enable_indexscan="off", enable_bitmapscan="off") as by_heap,
+    ):
+        # Holding APL-1 lines both reservations up on it before either finishes.
+        async with engine.connect() as holding, holding.begin():
+            await holding.execute(
+                select(Product).where(Product.sku == "APL-1").with_for_update(key_share=True)
+            )
+            reserving = [
+                asyncio.create_task(controller.apply_order_accepted(sessions(), order))
+                for sessions, order in [
+                    (by_index, await order_id("web-1")),
+                    (by_heap, await order_id("web-2")),
+                ]
+            ]
+            await eventually(both_waiting)
+
+        assert await asyncio.gather(*reserving) == ["reserved", "reserved"]
+
+    assert await on_hand(client, "APL-1") == 8
+    assert await on_hand(client, "BAN-1") == 8
 
 
 async def delete_stream(valkey: Redis) -> None:
