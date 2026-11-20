@@ -18,16 +18,19 @@ async def test_upsert_creates_a_product_that_can_be_fetched(client: AsyncClient)
     assert fetched.json() == BANANAS
 
 
-async def test_upsert_with_an_existing_sku_replaces_the_product(client: AsyncClient) -> None:
+async def test_upsert_with_an_existing_sku_updates_name_and_price_but_keeps_stock(
+    client: AsyncClient,
+) -> None:
     await client.post("/products", json=BANANAS)
-    changed = {**BANANAS, "name": "Bananas 2kg", "price_cents": 379, "stock": 12}
+    changed = {**BANANAS, "name": "Bananas 2kg", "price_cents": 379, "stock": 999}
 
     updated = await client.post("/products", json=changed)
     listed = await client.get("/products")
 
+    stored = {**changed, "stock": 50}
     assert updated.status_code == 200
-    assert updated.json() == changed
-    assert listed.json() == [changed]
+    assert updated.json() == stored
+    assert listed.json() == [stored]
 
 
 async def test_get_unknown_sku_returns_404(client: AsyncClient) -> None:

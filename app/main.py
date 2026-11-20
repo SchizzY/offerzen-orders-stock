@@ -1,20 +1,39 @@
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
+from loguru import logger
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import health
 from app.catalog.router import router as catalog_router
+from app.config import settings
 from app.db import engine
+from app.events.router import router as events_router
+from app.logging import describe_error, setup_logging
+from app.orders.relay import run_relay
 from app.orders.router import router as orders_router
+from app.stock.router import router as stock_router
 from app.valkey import valkey
+
+RELAY_STOP_GRACE_SECONDS = 1.0
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+    stop = asyncio.Event()
+    relay = asyncio.create_task(run_relay(stop)) if settings.relay_enabled else None
     yield
+    stop.set()
+    if relay is not None:
+        try:
+            # On timeout this cancels the relay and waits for it to unwind.
+            await asyncio.wait_for(relay, RELAY_STOP_GRACE_SECONDS)
+        except TimeoutError:
+            logger.warning("relay did not stop within {}s, cancelled it", RELAY_STOP_GRACE_SECONDS)
     await valkey.aclose()
     await engine.dispose()
 
@@ -30,12 +49,55 @@ async def validation_error(_: Request, exc: RequestValidationError) -> Response:
     )
 
 
+class CatchUnhandledErrors:
+    """Answer any unhandled request error with a JSON 500 and one data-free log line.
+
+    Starlette's own catch-all handler re-raises to the server, which logs the traceback.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        response_started = False
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal response_started
+            response_started = response_started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracking_send)
+        except Exception as error:
+            if response_started:
+                raise
+            logger.error(
+                "unhandled error in {} {}: {}",
+                scope["method"],
+                scope["path"],
+                describe_error(error),
+            )
+            response = Response(
+                '{"detail":"internal server error"}',
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                media_type="application/json",
+            )
+            await response(scope, receive, send)
+
+
 def create_app() -> FastAPI:
+    setup_logging()
     app = FastAPI(title="Orders & Stock", lifespan=lifespan)
     app.add_exception_handler(RequestValidationError, validation_error)
+    app.add_middleware(CatchUnhandledErrors)
     app.include_router(health.router)
     app.include_router(catalog_router)
     app.include_router(orders_router)
+    app.include_router(stock_router)
+    app.include_router(events_router)
     return app
 
 

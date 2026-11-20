@@ -15,7 +15,6 @@ async def upsert_product(session: AsyncSession, data: schemas.Product) -> Produc
         set_={
             "name": stmt.excluded.name,
             "price_cents": stmt.excluded.price_cents,
-            "stock": stmt.excluded.stock,
             "updated_at": func.now(),
         },
     ).returning(Product)

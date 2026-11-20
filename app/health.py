@@ -1,16 +1,14 @@
 import asyncio
-import logging
 from collections.abc import Awaitable
 
 from fastapi import APIRouter, Response, status
+from loguru import logger
 from sqlalchemy import text
 
 from app.db import SessionDep
 from app.valkey import ValkeyDep
 
 PROBE_TIMEOUT_SECONDS = 2
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
 
@@ -21,7 +19,7 @@ async def _probe(dependency: str, check: Awaitable[object]) -> str:
             await check
     except Exception as exc:
         logger.warning(
-            "health probe failed: dependency=%s error=%s", dependency, type(exc).__name__
+            "health probe failed: dependency={} error={}", dependency, type(exc).__name__
         )
         return "unavailable"
     return "ok"

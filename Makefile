@@ -1,4 +1,4 @@
-.PHONY: install up down reset migrate run test lint fmt seed demo-duplicates
+.PHONY: install up down reset migrate run worker consumer test lint fmt seed demo-duplicates demo-outage
 
 install:
 	poetry install
@@ -18,6 +18,12 @@ migrate:
 run:
 	poetry run uvicorn app.main:app --reload
 
+worker:
+	poetry run python -m app.stock.worker
+
+consumer:
+	poetry run python scripts/feed_consumer.py
+
 test:
 	./scripts/test.sh
 
@@ -31,3 +37,6 @@ fmt:
 
 seed demo-duplicates:
 	poetry run python scripts/seed_and_burst.py
+
+demo-outage:
+	poetry run python scripts/outage_demo.py

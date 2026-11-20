@@ -2,6 +2,9 @@ import hashlib
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Literal
+
+StockStatus = Literal["pending", "reserved", "insufficient"]
 
 
 @dataclass(frozen=True, slots=True)
