@@ -69,7 +69,7 @@ You do not need a `.env` file. The defaults match the Compose ports. To change a
 
 The interactive API docs are at http://localhost:8000/docs.
 
-Stop each process with Ctrl+C or `SIGTERM`; each exits 0. `make down` stops the containers and keeps the data. `make reset` also deletes the volumes, and with them every database in that Postgres.
+Stop each process with Ctrl+C. The worker and the consumer also exit 0 on `SIGTERM`; the API shuts down cleanly on `SIGTERM` and then exits 143, as uvicorn re-raises the signal. `make down` stops the containers and keeps the data. `make reset` also deletes the volumes, and with them every database in that Postgres.
 
 ### Make targets
 

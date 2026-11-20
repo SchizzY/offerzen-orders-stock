@@ -246,7 +246,7 @@ The demo stops a real process rather than pausing a loop inside one. The assignm
 ## Logging and data hygiene
 
 - Every log line goes through loguru to one stderr sink, as text or as JSON with `LOG_JSON=true`. The stdlib loggers of uvicorn, SQLAlchemy and asyncpg are routed into loguru, so each record is printed once.
-- Logs never contain `customer_id` or request bodies. They contain `order_ref`, `sku`, `seq` and `qty`. Tests place orders with a recognizable customer id and assert that it never reaches the relay, worker or error logs.
+- Logs never contain `customer_id` or request bodies. Relay and worker lines carry `order_ref` and `seq`. Tests place orders with a recognizable customer id and assert that it never reaches the relay, worker or error logs.
 - A Postgres error carries row values in its `DETAIL` line and its SQL text. SQLAlchemy runs with `hide_parameters=True`. A loguru patcher also reduces any record that holds a database error to its first message line, the error class and the SQLSTATE, and drops the traceback. Loguru's `diagnose` and `backtrace` are off, so tracebacks never print variable values.
 - An unhandled error in a request returns `{"detail": "internal server error"}` with status `500` and logs one line.
 - Validation errors return `type`, `loc` and `msg` only. They do not echo the rejected input, which can be bytes, `NaN`, a lone surrogate or deeply nested JSON that does not encode safely.
@@ -273,7 +273,7 @@ A test suite proves little if it still passes when the code is wrong. I broke si
 | Remove the `stock_status` guard in the worker | Seven tests in `tests/test_stock.py`, including `test_redelivering_the_whole_stream_changes_nothing`, `test_two_workers_racing_over_shared_skus_apply_every_order_once`, and the after-commit-before-ack case of `test_an_unacked_entry_is_applied_once_when_its_worker_resumes` |
 | Remove the SKU order from the product lock query | `test_reservations_whose_plans_read_skus_in_different_orders_do_not_deadlock`, in 12 of 20 runs. The race it sets up does not deadlock every time, so one run can miss this mutation. |
 | Remove the advisory lock from the sequencer | `test_concurrent_sequencers_number_each_event_exactly_once`, `test_relay_publishes_what_it_sequences_while_the_publisher_waits_to_poll` and `test_shutdown_cancels_a_relay_stuck_on_a_postgres_lock` |
-| Put back the `WATCH` guard in place of the append script | `test_relay_publishes_as_fast_while_a_consumer_group_reads_and_acks` and `test_stream_lost_between_reading_its_top_and_writing_is_republished_whole` |
+| Put back the original `WATCH` guard, which ended the round on a mismatch, in place of the append script | `test_relay_publishes_as_fast_while_a_consumer_group_reads_and_acks` and `test_stream_lost_between_reading_its_top_and_writing_is_republished_whole` |
 | Remove `ON CONFLICT DO NOTHING` from order intake | Six tests in `tests/test_orders_api.py`, including `test_concurrent_duplicates_count_once` |
 
 ### Review loop
