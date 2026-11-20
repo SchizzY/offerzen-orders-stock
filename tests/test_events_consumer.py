@@ -288,6 +288,8 @@ def test_an_unreadable_cursor_file_stops_with_an_error(tmp_path: Path, unreadabl
     cursor_file = tmp_path / "cursor"
     cursor_file.write_bytes(b"\xff\xfe\x00")
     if unreadable == "no-permission":
+        if os.geteuid() == 0:
+            pytest.skip("root can read a mode-000 file")
         cursor_file.write_text("7\n")
         cursor_file.chmod(0)
     try:

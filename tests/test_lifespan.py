@@ -20,8 +20,6 @@ from tests.test_relay import (
     stream_ids,
 )
 
-HUNG_VALKEY_PORT = 8300
-
 
 @pytest.fixture(autouse=True)
 def relay_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,8 +69,9 @@ async def test_shutdown_cancels_a_relay_stuck_on_a_hung_valkey(
         await reader.read()
         writer.close()
 
-    server = await asyncio.start_server(never_reply, "127.0.0.1", HUNG_VALKEY_PORT)
-    hung = Redis.from_url(f"redis://127.0.0.1:{HUNG_VALKEY_PORT}/1")
+    server = await asyncio.start_server(never_reply, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    hung = Redis.from_url(f"redis://127.0.0.1:{port}/1")
     monkeypatch.setattr("app.valkey.valkey", hung)
     try:
         async with asyncio.timeout(5), app.router.lifespan_context(app):

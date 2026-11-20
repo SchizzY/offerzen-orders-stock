@@ -98,7 +98,10 @@ async def test_worker_process_exits_cleanly_when_signalled_again_while_stopping(
         await eventually(registered)
         async with asyncio.timeout(10):
             while worker.returncode is None:
-                worker.send_signal(stop_signal)
+                # os.kill, not send_signal: send_signal polls and can reap the child
+                # before asyncio's watcher, which then reports returncode 255.
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(worker.pid, stop_signal)
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(worker.wait(), 0.005)
     finally:
