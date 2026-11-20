@@ -19,6 +19,8 @@ from app.orders.router import router as orders_router
 from app.stock.router import router as stock_router
 from app.valkey import valkey
 
+RELAY_STOP_GRACE_SECONDS = 1.0
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
@@ -27,7 +29,11 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     yield
     stop.set()
     if relay is not None:
-        await relay
+        try:
+            # On timeout this cancels the relay and waits for it to unwind.
+            await asyncio.wait_for(relay, RELAY_STOP_GRACE_SECONDS)
+        except TimeoutError:
+            logger.warning("relay did not stop within {}s, cancelled it", RELAY_STOP_GRACE_SECONDS)
     await valkey.aclose()
     await engine.dispose()
 
