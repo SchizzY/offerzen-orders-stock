@@ -49,7 +49,7 @@ Run every command from the repository root. You need three terminals.
 	make worker
 	```
 
-	On its first start the worker logs one warning, `stock group missing, creating it`. That is expected.
+	On its first start the worker also logs `stock group created`.
 
 6. In a third terminal, start the feed consumer:
 
@@ -144,19 +144,21 @@ make demo-outage
 The script creates a new SKU with stock 100 and runs four phases. Each row shows the time since start and what `GET /stock/{sku}` returned:
 
 ```text
+worker log: /var/folders/5t/84h9v5k91mj5bck13y34h6hr0000gn/T/outage-demo-OUT-5A32AB-au0wmrkg.log
+
 phase        t+s on_hand pending  note
-seed         0.0     100       0  seeded OUT-53C415
-healthy      0.8     100       0  worker started
+seed         0.0     100       0  seeded OUT-5A32AB
+healthy      0.7     100       0  worker started
 healthy      0.8     100       6  placed 3 x qty 2
-healthy      1.5      94       0  drained
-healthy      1.5      94       0  3 orders reserved
-outage       2.6      94       0  worker stopped (SIGTERM, exit 0)
-outage       2.6      94      15  placed 5 x qty 3, all 201
-outage       2.7      94      15  5 orders pending
-outage       5.7      94      15  after a 3s hold
-recovery     6.4      91      12  worker restarted
-recovery     6.6      79       0  caught up 1.0s after restart
-recovery     6.7      79       0  8 orders reserved
+healthy      1.0      94       0  drained
+healthy      1.0      94       0  3 orders reserved
+outage       2.1      94       0  worker stopped (SIGTERM, exit 0)
+outage       2.2      94      15  placed 5 x qty 3, all 201
+outage       2.2      94      15  5 orders pending
+outage       5.2      94      15  after a 3s hold
+recovery     5.8      79       0  worker restarted
+recovery     5.8      79       0  caught up 0.6s after restart
+recovery     5.8      79       0  8 orders reserved
 
 PASS
 ```
@@ -167,7 +169,9 @@ What to look for:
 - **Outage.** The worker process is stopped. Five more orders still return `201`. `on_hand` stays at 94 and `pending_qty` shows the 15 units that wait in the stream.
 - **Recovery.** The restarted worker drains the backlog. `on_hand` reaches 79 and all eight orders are `reserved`. The eight orders took 21 units in total.
 
-The script exits 0 on `PASS`, 1 if an expectation failed or catch-up took longer than `--timeout` (default 30 seconds), and 2 if it cannot run. It cannot run when the API or Valkey is unreachable, or when another stock worker is active. A worker stopped a few seconds ago still looks active, so the script prints `waiting for recently active consumers to go idle` and waits up to about 11 seconds. `--force` skips that check. The worker's own log goes to `outage_demo_worker.log` in the system temp directory, and the script prints the path when it starts.
+The script exits 0 on `PASS`, 1 if an expectation failed, 2 if it cannot run, and 128 + N if signal N stopped it. It stops its worker on every exit, including Ctrl+C, `SIGTERM` and `SIGHUP`. It cannot run when the API or Valkey is unreachable, or when another stock worker is active. A worker stopped a few seconds ago still looks active, so the script prints `waiting for recently active consumers to go idle` and waits up to about 11 seconds. If a worker is still active then, it exits with `a stock worker was active in the last 10 s (<name>); stop it and re-run, or pass --force`. `--force` skips that check.
+
+`--timeout` (default 30 seconds, a positive, finite number) limits how long the worker may take to register. It also limits how long catch-up may go without progress, not the total wait. Progress means a change in the SKU's `pending_qty`, or in the stock group's last delivered id or pending count, so a worker that is still working through a large backlog does not fail. On a stall, the failure names the backlog in the group and suggests a larger `--timeout`. The worker's own log goes to a new file for each run, `outage-demo-<sku>-<random>.log` in the system temp directory, and the script prints its path before the table.
 
 ## API reference
 
@@ -381,11 +385,15 @@ Stop it and start it again, and it continues after the saved cursor.
 | `--base-url` | `$BASE_URL` or `http://localhost:8000` | API to poll |
 | `--cursor-file` | `.feed_cursor` | Where the last handled `seq` is saved |
 | `--from-start` | off | Ignore the saved cursor and start at `seq` 0 |
-| `--once` | off | Exit instead of following the feed |
+| `--once` | off | Read every page after the cursor, then exit |
 | `--interval` | `1.0` | Seconds to wait between polls when there are no new events |
 
 Pass options through Poetry, for example `poetry run python scripts/feed_consumer.py --from-start --once`.
 
+- Before the first poll, the consumer checks that it can write the cursor file. If it cannot, or the file does not hold a number, it exits 2.
+- A network error, a `5xx`, a `429` or a `200` that is not the feed is retried. The consumer prints the reason on stderr, for example `feed unavailable: HTTP 503; retrying in 2s`, and backs off up to 30 seconds. With `--once` it exits 1 instead.
+- Any other `4xx` exits 1, because a retry cannot fix it. A `422` means the feed rejected the saved cursor.
+- If stdout closes, for example in `| head`, the consumer exits 141 without an error message.
 - Give each consumer its own `--cursor-file`. Two consumers that share one file overwrite each other's cursor.
 - After `make reset` or a switch to a new database, the saved cursor can be ahead of the new feed. The consumer then skips every event up to the old cursor. Delete `.feed_cursor` or pass `--from-start`.
 
@@ -483,7 +491,8 @@ app/
     domain.py        request fingerprint and totals, no framework imports
     relay.py         outbox sequencer and stream publisher
   stock/             stock: router, controller, schemas
-    worker.py        stock worker process
+    consumer.py      stream consumer loop of the stock worker
+    worker.py        stock worker entry point, exits 0 on a stop signal
   events/            order-accepted feed: router, controller, schemas
 migrations/versions/ 0001 catalog and orders, 0002 stock status and outbox seq
 scripts/

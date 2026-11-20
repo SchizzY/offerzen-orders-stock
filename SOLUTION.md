@@ -22,7 +22,7 @@ The assignment asks for an orders flow that updates stock, survives duplicate su
           ▼                                         ▼
  ┌──────────────────────────── API process (make run) ───────────────────────────┐
  │  routers: /products  /orders  /stock  /events  /health                        │
- │  relay task: (1) number committed outbox rows (2) XADD each one to the stream │
+ │  relay: a sequence loop numbers committed rows, a publish loop XADDs them     │
  └───────┬───────────────────────────────────────────────────────────┬───────────┘
          │ order + lines + outbox row in one transaction             │ XADD id "<seq>-0"
          ▼                                                           ▼
@@ -69,7 +69,7 @@ All capabilities share one database and one codebase. Orders reads product price
 
 ### How the parts can run and evolve on their own
 
-- **Scale the API.** Run more API processes, or `uvicorn --workers N`. Each process runs its own relay. An advisory lock lets only one relay number events at a time, and a `WATCH` guard keeps the stream free of holes, so extra relays are safe. The relay could also move to its own process with a small entry point, because it needs only Postgres and Valkey.
+- **Scale the API.** Run more API processes, or `uvicorn --workers N`. Each process runs its own relay. An advisory lock lets only one relay number events at a time, and an atomic append script keeps the stream free of holes, so extra relays are safe. The relay could also move to its own process with a small entry point, because it needs only Postgres and Valkey.
 - **Scale the worker.** Run more stock workers. The consumer group gives each entry to one worker. Row locks keep two workers from applying one order twice. A worker that dies leaves its unacknowledged entries behind, and the next live worker claims them after 30 seconds.
 - **Add consumers.** Another internal service can read the stream with its own consumer group, without any change to orders. An external team uses the feed.
 - **Split stock out.** The worker would read the order lines from the event payload instead of `order_items`. It would keep its own table of applied orders keyed by `order_id` in place of `orders.stock_status`, and its own stock table. Orders would learn the outcome from a `stock.reserved` or `stock.insufficient` event. The stream contract stays the same.
@@ -128,12 +128,12 @@ Three things show it works:
 
 The order, its lines and its outbox row commit together or not at all. The request never writes to Valkey, so there is no dual write to get wrong, and `POST /orders` works while Valkey or the worker is down.
 
-The relay is a background task in the API process. Each round runs two steps:
+The relay is a background task in the API process. It runs two loops side by side in one `asyncio.TaskGroup`:
 
-1. **Sequence.** Under a Postgres advisory lock, number the committed rows that have no `seq` yet. Numbering continues from the highest existing `seq`, in `id` order, up to 100 rows per round.
-2. **Publish.** Read the stream's last entry id. Select the events with a higher `seq`. Add each one to the stream with the id `<seq>-0`, then set `published_at` on them.
+1. **Sequence.** Under a Postgres advisory lock, number the committed rows that have no `seq` yet. Numbering continues from the highest existing `seq`, in `id` order, up to 100 rows per round. A round that numbers rows wakes the publish loop.
+2. **Publish.** Read the stream's last generated id. Select the events with a higher `seq`. Append them to the stream with the ids `<seq>-0`, then set `published_at` on them.
 
-After a round that filled a batch, the next round starts at once. Otherwise the relay waits 0.5 seconds. A failed round logs the exception class and backs off, doubling the wait up to 5 seconds.
+In each loop, a round that filled a batch starts the next round at once. Otherwise the loop waits 0.5 seconds. A failed round logs `relay sequence failed` or `relay publish failed` with the exception class, and only that loop backs off, doubling the wait up to 5 seconds. The loops are separate so that a Valkey outage never holds up sequencing, which is what `GET /events` serves. On shutdown, the API stops the relay, waits up to 1 second, then cancels it.
 
 ### Why not use `outbox_events.id` as the cursor
 
@@ -145,19 +145,23 @@ A bigserial id is taken at insert time, before the transaction commits. Transact
 
 `pg_advisory_xact_lock` makes sequencers run one at a time, across processes. It is scoped to the transaction, so Postgres releases it on commit, on rollback, or when a crashed relay's connection drops. The numbering statement runs after the lock is taken. Its snapshot therefore includes the previous sequencer's commit, and it continues from the right number.
 
-### Explicit stream ids and the WATCH guard
+### Explicit stream ids and the atomic append
 
 The entry id is `<seq>-0`. Valkey rejects an `XADD` whose id is not above the stream's last id, so no `seq` can enter the stream twice, and stream order is `seq` order. The relay decides what to publish from the stream's last id, not from `published_at`. `published_at` is for people reading the table.
 
-The batch goes in under `WATCH` on the stream key. The relay checks that the stream still ends where the round read it, and `EXEC` fails if the key changed in the meantime. Without the guard, a stream deleted in the middle of a round could receive `seq` 11 onward with 1 to 10 missing, and the worker would never see orders 1 to 10. With the guard, that round ends and the next round starts from the stream's real end. A second relay that publishes first also ends the round.
+The batch goes in through one Lua script, `_APPEND_AT_TOP`, which the relay loads with `register_script`. Valkey runs a script atomically. The script compares the stream's last generated id with the top that the relay read before its Postgres query. If they match, it adds the whole batch with `XADD`. If they differ, it writes nothing, and the relay starts the round again at once from the stream's real end. Without the check, a stream deleted in the middle of a round could receive `seq` 11 onward with 1 to 10 missing, and the worker would never see orders 1 to 10. A second relay that publishes first also fails the check.
+
+The first version used `WATCH` on the stream key with `MULTI` and `EXEC`. Consumer group commands such as `XREADGROUP`, `XACK` and `XAUTOCLAIM` also count as changes to the key. With a worker running, most rounds aborted and the relay slept a poll interval after each one. The review measured publishing 20 to 30 times slower. `test_relay_publishes_as_fast_while_a_consumer_group_reads_and_acks` publishes 5,000 events while another connection reads and acknowledges them. It fails if that takes more than three times as long as publishing alone, plus 1 second.
 
 ### Republish after the stream is lost
 
-If the stream key is gone, its last id counts as 0 and the relay republishes every event from `seq` 1. The worker recreates its consumer group from the start and reads every entry again. The `stock_status` guard turns each one into a duplicate. I checked the republish path by hand on a live stack. I deleted a stream that held 16 events. The relay republished all 16 within 2 seconds, the worker logged 16 `result=duplicate` lines, and stock did not change.
+If the stream key is gone, its last id counts as 0 and the relay republishes every event from `seq` 1. The worker recreates its consumer group from the start and reads every entry again. The `stock_status` guard turns each one into a duplicate. I checked the republish path by hand on a live stack. I deleted a stream that held 1,416 events while a worker ran. The relay republished all 1,416 within 0.5 seconds. The worker logged that the group was missing, recreated it, and logged 1,416 `result=duplicate` lines within 10 seconds, and stock did not change.
 
 ## Stock worker
 
-`python -m app.stock.worker` reads the stream through the `stock` consumer group, 50 entries at a time. Each round of its loop does three things:
+`python -m app.stock.worker` starts the worker. `app/stock/worker.py` is a thin entry point. Before its slow imports, it installs `SIGINT` and `SIGTERM` handlers that exit 0. It then runs the consumer in `app/stock/consumer.py`. A stop signal therefore exits 0 at any point, including start-up and interpreter shutdown.
+
+The consumer reads the stream through the `stock` consumer group, 50 entries at a time. Before its first read, it creates the group if the group is missing, reading from the start of the stream, and logs `stock group created` at `INFO`. Each round of its loop does three things:
 
 1. Claim entries that another consumer left unacknowledged for 30 seconds or more (`XAUTOCLAIM`).
 2. Read this worker's own unacknowledged entries again.
@@ -202,12 +206,14 @@ Tests cover both crash points.
 
 Consumer names are `<hostname>-<pid>`, so a restarted worker has a new name. Without a claim step, the old name's unacknowledged entries would never be read again. Each round claims entries that have been idle for 30 seconds or more.
 
+On a clean stop, the worker finishes the entries it holds and removes its own consumer name from the group if no entries are pending on it. Dead names therefore do not pile up in `XINFO CONSUMERS`. A name that still has pending entries stays, so the next worker can claim them.
+
 ### Errors
 
 - A malformed entry is logged with its error class and acknowledged.
 - An entry for an order that does not exist returns `unknown` and is acknowledged.
 - A database error leaves the entry unacknowledged. The worker backs off from 0.5 up to 5 seconds and tries the same entry again.
-- A missing consumer group (`NOGROUP`) is created again from the start of the stream, and the worker carries on.
+- A consumer group lost mid-run (`NOGROUP`) logs a warning and is created again from the start of the stream, and the worker carries on.
 
 ### Reading stock
 
@@ -220,10 +226,10 @@ Postgres holds every accepted order and its event, so any process can stop and p
 | What is down | `POST /orders` | `GET /events` | Stock | Recovery |
 | --- | --- | --- | --- | --- |
 | Stock worker | `201`, `pending` | keeps serving | Entries wait in the consumer group | The restarted worker drains the backlog |
-| Valkey | `201`, `pending` | keeps serving, because the relay still assigns `seq` | Waits | The relay backs off up to 5 seconds and publishes when Valkey returns |
+| Valkey | `201`, `pending` | keeps serving, because the sequence loop runs apart from the publish loop | Waits | The publish loop backs off up to 5 seconds and publishes when Valkey returns |
 | Postgres | `500` | `500` | The worker retries | Nothing is accepted without the source of truth. `/health` returns `503`. |
 
-I checked the first two rows on a live stack. `make demo-outage` is the required demonstration of the first row. It stops the worker process, places five orders that all return `201`, holds for 3 seconds with `on_hand` unchanged, then restarts the worker. In my run, stock caught up 1.0 second after the restart, from 94 to 79, with all eight orders `reserved`.
+`make demo-outage` is the required demonstration of the first row. It stops the worker process, places five orders that all return `201`, holds for 3 seconds with `on_hand` unchanged, then restarts the worker. In my run, stock caught up 0.6 seconds after the restart, from 94 to 79, with all eight orders `reserved`. `test_relay_keeps_sequencing_new_orders_while_valkey_is_down` and `test_relay_survives_valkey_outage_and_publishes_once_it_returns` cover the Valkey row.
 
 The demo stops a real process rather than pausing a loop inside one. The assignment allows either. A real stop exercises the real recovery path: a new consumer name, the group's saved position, and unacknowledged entries.
 
@@ -249,23 +255,25 @@ The demo stops a real process rather than pausing a loop inside one. The assignm
 
 ## Testing strategy
 
-- **Real services.** The suite runs against the Compose Postgres 17 and Valkey 8. There is no SQLite and no mock of the database or the stream, because the behaviour under test is in Postgres and Valkey: unique constraints, row locks, advisory locks, consumer groups and `WATCH`.
+- **Real services.** The suite runs against the Compose Postgres 17 and Valkey 8. There is no SQLite and no mock of the database or the stream, because the behaviour under test is in Postgres and Valkey: unique constraints, row locks, advisory locks, consumer groups and Lua scripts.
 - **Isolation.** Each run uses its own database (`TEST_DB`) and Valkey database number (`TEST_VALKEY_DB`). Every test starts with empty tables and an empty Valkey database. The suite refuses to run against a database name that does not end in `_test`, or against Valkey database 0.
-- **One step at a time.** Tests turn the background relay off and call `sequence_pending`, `publish_pending` and `consume_once` directly. That makes each interleaving reproducible. One test runs the worker as a real process and stops it with `SIGINT` and `SIGTERM`.
-- **Concurrency.** Ten concurrent duplicate orders. Two workers racing over 100 orders on shared SKUs. A reservation during an order placement on the same SKUs. Two sequencers at once. Two publishers at once. An event that commits late.
-- **Failure.** Valkey down during a relay round. The stream deleted or the group destroyed during a read. A worker crash before commit, and after commit but before `XACK`. A dead worker's entries claimed by its replacement. A database error during apply.
+- **One step at a time.** Tests turn the background relay off and call `sequence_pending`, `publish_pending` and `consume_once` directly. That makes each interleaving reproducible. Other tests run the relay through the app's lifespan, run the worker as a real process and signal it while it starts, runs and stops, and run `scripts/outage_demo.py` end to end.
+- **Concurrency.** Ten concurrent duplicate orders. Two workers racing over 100 orders on shared SKUs. A reservation during an order placement on the same SKUs. Two reservations whose query plans lock the SKUs in different orders. Two sequencers at once. Two publishers at once. A consumer group that reads and acknowledges while the relay publishes. An event that commits late.
+- **Failure.** Valkey down during a relay round, and Valkey down while new orders still reach the feed. The stream deleted during a read, or between the relay's read of its top and the append. The group destroyed during a read. A worker crash before commit, and after commit but before `XACK`. A dead worker's entries claimed by its replacement. A database error during apply. A relay stuck on a hung Valkey or a held Postgres lock at shutdown.
 - **Migrations.** Phase 1 rows survive the 0002 upgrade, a downgrade and a second upgrade, and `alembic check` finds no drift between the models and the schema.
 - **Test-first fixes.** Each bug found in review got a failing test first, then the fix.
 
 ### Mutation checks
 
-A test suite proves little if it still passes when the code is wrong. I broke four key mechanisms on purpose and ran the related tests. Each edit was made in the source, run with `./scripts/test.sh -k <name>`, and reverted with `git checkout`.
+A test suite proves little if it still passes when the code is wrong. I broke six key mechanisms on purpose and ran the full suite against each. Each edit was made in a fresh copy of the source, so the checkout stayed clean.
 
 | Mutation | Tests that failed |
 | --- | --- |
 | Lock with `FOR UPDATE` instead of `FOR NO KEY UPDATE` | `test_reserving_does_not_deadlock_with_an_order_being_placed_on_the_same_skus` |
-| Remove the `stock_status` guard in the worker | `test_redelivering_the_whole_stream_changes_nothing`, and the after-commit-before-ack case of `test_an_unacked_entry_is_applied_once_when_its_worker_resumes` |
-| Remove the advisory lock from the sequencer | `test_concurrent_sequencers_number_each_event_exactly_once` |
+| Remove the `stock_status` guard in the worker | Seven tests in `tests/test_stock.py`, including `test_redelivering_the_whole_stream_changes_nothing`, `test_two_workers_racing_over_shared_skus_apply_every_order_once`, and the after-commit-before-ack case of `test_an_unacked_entry_is_applied_once_when_its_worker_resumes` |
+| Remove the SKU order from the product lock query | `test_reservations_whose_plans_read_skus_in_different_orders_do_not_deadlock`, in 12 of 20 runs. The race it sets up does not deadlock every time, so one run can miss this mutation. |
+| Remove the advisory lock from the sequencer | `test_concurrent_sequencers_number_each_event_exactly_once`, `test_orders_are_numbered_from_one_in_commit_order`, and two other relay tests |
+| Put back the `WATCH` guard in place of the append script | `test_relay_publishes_as_fast_while_a_consumer_group_reads_and_acks` and `test_stream_lost_between_reading_its_top_and_writing_is_republished_whole` |
 | Remove `ON CONFLICT DO NOTHING` from order intake | Six tests in `tests/test_orders_api.py`, including `test_concurrent_duplicates_count_once` |
 
 ### Review loop
@@ -278,6 +286,7 @@ I built the system with AI coding agents, in small units with a written design f
 - Values above the 32-bit range caused `500`, so input types now have explicit bounds.
 - `POST /products` overwrote stock on every seed run, so stock is now set only on first insert.
 - A reader keyed on `outbox_events.id` skipped late commits. The fix is the gapless `seq`.
+- Consumer group reads and acknowledgements aborted most `WATCH` rounds, so the relay now appends through an atomic script.
 
 ## Trade-offs and alternatives considered
 
@@ -288,6 +297,9 @@ I built the system with AI coding agents, in small units with a written design f
 - **Option B, the daily report.** Not chosen. See the feed section.
 - **One process.** The assignment allows a single process with a background worker. I split the stock worker into its own process, so the outage demo stops a real process and the stock capability can be deployed and scaled on its own. The relay stays in the API process, because it belongs to the orders capability.
 - **Partial reservations and backorders.** Out of scope. All lines or none keeps the state machine to three values.
+- **Throughput.** The worker applies each entry in its own transaction and acknowledges it before the next one. On my laptop, one stock worker applied 80 to 110 events per second, measured on queued backlogs of 400 and 1,000 orders. More workers in the group should raise that, because the group gives each entry to one worker. After the stream is lost, the relay republishes from `seq` 1 and the worker reads every entry again as a duplicate, so that recovery takes longer as the history grows. I kept one transaction per entry, because it makes the crash cases simple.
+- **`published_at` can stay empty.** If the reply from the append script is lost, or shutdown cancels the relay between the append and the update, the entries are in the stream but `published_at` stays `NULL`. The next round starts from the stream's top, so it never stamps them. Nothing reads `published_at`, so I left it as information only.
+- **Migration 0002 needs a stop.** It renames `outbox_events.processed_at` to `published_at`, so code from before and after 0002 cannot share one schema. A zero-downtime path would add the new column, write both, and drop the old one later. With no deployed version to protect, the README tells you to stop the API and the worker, then migrate.
 
 ## Known limitations
 
@@ -297,7 +309,7 @@ I built the system with AI coding agents, in small units with a written design f
 - **The 0002 downgrade discards `stock_status`.** It also drops `seq`. After an upgrade again, every order is `pending` and every event is numbered again, so stock and the stream no longer agree with the orders. The downgrade is fit for a development reset only.
 - **No authentication.** The feed exposes `customer_id` to anyone who can reach the API.
 - **No dead-letter handling.** A database error that repeats on every attempt keeps the worker retrying that entry with backoff. Insufficient stock and malformed entries are not in this class, because they are acknowledged.
-- **Polling latency.** The relay polls every 0.5 seconds and the example consumer every second. `LISTEN/NOTIFY` could wake the relay instead.
+- **Polling latency.** The relay's sequence loop polls every 0.5 seconds and the example consumer every second. `LISTEN/NOTIFY` could wake the relay instead.
 
 ## What I would do next
 
@@ -321,7 +333,7 @@ A 9 to 10 minute outline. Before you record, run `make up` and `make migrate`, a
 | 1:30 to 3:00 | Demo 1: duplicates | `make demo-duplicates`. Point at the one `201` per order ref, the `200` replays and the `409`. Show the worker's `result=reserved` lines and the consumer's `seq=` lines. Run `curl` on `GET /orders/{order_ref}` to show `stock_status`. |
 | 3:00 to 4:30 | Demo 2: outage and catch-up | Stop `make worker`. Run `make demo-outage` and walk through the healthy, outage and recovery rows. |
 | 4:30 to 5:45 | Idempotent intake | `create_order` in `app/orders/controller.py`, `request_fingerprint` in `app/orders/domain.py`, and `test_concurrent_duplicates_count_once` |
-| 5:45 to 7:15 | Outbox, relay and seq | `_ASSIGN_SEQ` and the advisory lock in `app/orders/relay.py`. Explain the late-commit gap with `test_uncommitted_event_waits_and_takes_the_next_seq_once_committed`. Then `publish_pending` and its `WATCH` guard. |
-| 7:15 to 8:15 | Stock worker | `apply_order_accepted` in `app/stock/controller.py`: the `FOR NO KEY UPDATE` comment, all lines or none, and the `stock_status` guard. Then `consume_once` and `_read` in `app/stock/worker.py`: acknowledge after commit, and `XAUTOCLAIM`. |
+| 5:45 to 7:15 | Outbox, relay and seq | `_ASSIGN_SEQ` and the advisory lock in `app/orders/relay.py`. Explain the late-commit gap with `test_uncommitted_event_waits_and_takes_the_next_seq_once_committed`. Then `publish_pending`, the `_APPEND_AT_TOP` script, and the two loops in `run_relay`. |
+| 7:15 to 8:15 | Stock worker | `apply_order_accepted` in `app/stock/controller.py`: the `FOR NO KEY UPDATE` comment, all lines or none, and the `stock_status` guard. Then `consume_once` and `_read` in `app/stock/consumer.py`: acknowledge after commit, and `XAUTOCLAIM`. |
 | 8:15 to 9:00 | The feed | `curl 'localhost:8000/events?after=0&limit=2'`. Stop the consumer, start it again, and show that it continues from its cursor. |
 | 9:00 to 10:00 | Trade-offs and limitations | The trade-offs and known limitations sections of this file, then what comes next |
